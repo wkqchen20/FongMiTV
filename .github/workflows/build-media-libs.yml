@@ -50,16 +50,15 @@ jobs:
           distribution: temurin
           java-version: 21
 
-      - uses: android-actions/setup-android@v3
-
       - name: Install NDK and CMake
         working-directory: media
         run: |
           set -euo pipefail
           ndk=$(sed -n 's/^android.ndk.version=//p' libraries/decoder_ffmpeg/src/main/resources/META-INF/androidx.media3.decoder.ffmpeg/native-dependencies.properties)
           echo "NDK $ndk"
-          yes | sdkmanager --licenses > /dev/null || true
-          sdkmanager --install "ndk;$ndk" "cmake;3.31.6" > /dev/null
+          sdkmanager=$(ls -d "$ANDROID_HOME"/cmdline-tools/*/bin/sdkmanager | sort -V | tail -1)
+          yes | "$sdkmanager" --licenses > /dev/null || true
+          "$sdkmanager" --install "ndk;$ndk" "cmake;3.31.6" > /dev/null
           echo "sdk.dir=$ANDROID_HOME" > local.properties
 
       - uses: gradle/actions/setup-gradle@v4
