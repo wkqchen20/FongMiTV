@@ -1,0 +1,114 @@
+name: Build media3 AARs
+
+# Builds the lib-*.aar files that app/libs needs from FongMi/media and publishes
+# them to the "build-libs" release of this repository, where release.yml picks them up.
+
+on:
+  workflow_dispatch:
+    inputs:
+      media_ref:
+        description: "FongMi/media branch, tag or commit"
+        required: false
+        default: "release-1.11.0-fongmi"
+  push:
+    paths:
+      - ".github/workflows/build-media-libs.yml"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-media-libs
+  cancel-in-progress: true
+
+env:
+  MEDIA_REPO: FongMi/media
+  MEDIA_REF: ${{ inputs.media_ref || 'release-1.11.0-fongmi' }}
+  LIBS_RELEASE_TAG: build-libs
+  # Same list as move.txt in FongMi/media.
+  MODULES: >-
+    lib-common lib-container lib-database lib-datasource lib-datasource-okhttp
+    lib-datasource-rtmp lib-decoder lib-decoder-ffmpeg lib-decoder-mpegh lib-effect
+    lib-exoplayer lib-exoplayer-dash lib-exoplayer-hls lib-exoplayer-rtsp
+    lib-exoplayer-smoothstreaming lib-extractor lib-mpvplayer lib-session lib-ui
+    lib-ui-danmaku
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Check out FongMi/media
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.MEDIA_REPO }}
+          ref: ${{ env.MEDIA_REF }}
+          path: media
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Install NDK and CMake
+        working-directory: media
+        run: |
+          set -euo pipefail
+          ndk=$(sed -n 's/^android.ndk.version=//p' libraries/decoder_ffmpeg/src/main/resources/META-INF/androidx.media3.decoder.ffmpeg/native-dependencies.properties)
+          echo "NDK $ndk"
+          yes | sdkmanager --licenses > /dev/null || true
+          sdkmanager --install "ndk;$ndk" "cmake;3.31.6" > /dev/null
+          echo "sdk.dir=$ANDROID_HOME" > local.properties
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Build AARs
+        working-directory: media
+        run: |
+          set -euo pipefail
+          tasks=""
+          for m in $MODULES; do tasks="$tasks :$m:assembleRelease"; done
+          ./gradlew --no-daemon --stacktrace $tasks
+
+      - name: Collect AARs
+        id: collect
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          for m in $MODULES; do
+            f=$(find media/libraries -path '*/outputs/aar/*' -name "$m-release.aar" | head -1)
+            [ -n "$f" ] || { echo "::error::$m-release.aar not found"; exit 1; }
+            cp "$f" dist/
+          done
+          sha=$(git -C media rev-parse HEAD)
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          {
+            echo "repository=https://github.com/$MEDIA_REPO"
+            echo "ref=$MEDIA_REF"
+            echo "commit=$sha"
+            echo "built=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "run=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          } > dist/SOURCE.txt
+          (cd dist && sha256sum *.aar > SHA256SUMS.txt)
+          ls -l dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: media-aars-${{ steps.collect.outputs.sha }}
+          path: dist/*
+
+      - name: Publish to build-libs release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          notes="lib-*.aar built from $MEDIA_REPO@${{ steps.collect.outputs.sha }} ($MEDIA_REF). Used by release.yml."
+          if gh release view "$LIBS_RELEASE_TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            gh release edit "$LIBS_RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --notes "$notes"
+          else
+            gh release create "$LIBS_RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+              --title "build-libs" --notes "$notes" --prerelease
+          fi
+          gh release upload "$LIBS_RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --clobber dist/*
