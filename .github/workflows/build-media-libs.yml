@@ -69,7 +69,7 @@ jobs:
           set -euo pipefail
           tasks=""
           for m in $MODULES; do tasks="$tasks :$m:assembleRelease"; done
-          ./gradlew --no-daemon --stacktrace $tasks
+          bash ./gradlew --no-daemon --stacktrace $tasks
 
       - name: Collect AARs
         id: collect

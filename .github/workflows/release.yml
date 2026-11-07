@@ -76,7 +76,7 @@ jobs:
           } > local.properties
 
       - name: Build release APKs
-        run: ./gradlew --no-daemon --stacktrace :app:assembleLeanbackRelease :app:assembleMobileRelease
+        run: bash ./gradlew --no-daemon --stacktrace :app:assembleLeanbackRelease :app:assembleMobileRelease
 
       - name: Collect APKs
         id: collect
