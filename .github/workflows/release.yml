@@ -1,0 +1,113 @@
+name: Build and release APK
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (leave empty to use v<versionName> from app/build.gradle)"
+        required: false
+        default: ""
+      prerelease:
+        description: "Mark as pre-release"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # Release in this repository that holds the git-ignored native AARs (app/libs/lib-*.aar) as assets.
+  LIBS_RELEASE_TAG: build-libs
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Download native AARs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NATIVE_LIBS_URL: ${{ secrets.NATIVE_LIBS_URL }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/libs"
+          if [ -n "${NATIVE_LIBS_URL:-}" ]; then
+            curl -fsSL "$NATIVE_LIBS_URL" -o "$RUNNER_TEMP/libs/libs.zip"
+          else
+            gh release download "$LIBS_RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --dir "$RUNNER_TEMP/libs"
+          fi
+          for z in "$RUNNER_TEMP"/libs/*.zip; do [ -e "$z" ] && unzip -o -j "$z" '*.aar' -d "$RUNNER_TEMP/libs"; done
+          cp "$RUNNER_TEMP"/libs/lib-*.aar app/libs/
+          for f in lib-mpvplayer-release.aar lib-decoder-ffmpeg-release.aar; do
+            [ -f "app/libs/$f" ] || { echo "::error::app/libs/$f is missing"; exit 1; }
+          done
+          ls -l app/libs
+
+      - name: Prepare signing config
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -z "${KEYSTORE_BASE64:-}" ]; then echo "::error::Secret KEYSTORE_BASE64 is not set"; exit 1; fi
+          echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.jks"
+          {
+            echo "sdk.dir=$ANDROID_HOME"
+            echo "storeFile=$RUNNER_TEMP/release.jks"
+            echo "keyAlias=$KEY_ALIAS"
+            echo "storePassword=$STORE_PASSWORD"
+          } > local.properties
+
+      - name: Build release APKs
+        run: ./gradlew --no-daemon --stacktrace :app:assembleLeanbackRelease :app:assembleMobileRelease
+
+      - name: Collect APKs
+        id: collect
+        run: |
+          set -euo pipefail
+          version=$(sed -nE 's/^\s*versionName\s+"([^"]+)".*/\1/p' app/build.gradle | head -1)
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            tag="${GITHUB_REF_NAME}"
+          elif [ -n "${{ inputs.tag }}" ]; then
+            tag="${{ inputs.tag }}"
+          else
+            tag="v${version}"
+          fi
+          mkdir -p dist
+          find app/build/outputs/apk -path '*/release/*.apk' -exec cp {} dist/ \;
+          ls -l dist
+          [ -n "$(ls dist)" ] || { echo "::error::No APK produced"; exit 1; }
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apk-${{ steps.collect.outputs.tag }}
+          path: dist/*.apk
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.collect.outputs.tag }}
+          name: ${{ steps.collect.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          prerelease: ${{ inputs.prerelease || false }}
+          generate_release_notes: true
+          files: dist/*.apk
