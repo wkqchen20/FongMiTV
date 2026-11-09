@@ -13,6 +13,7 @@ on:
   push:
     paths:
       - ".github/workflows/build-media-libs.yml"
+      - ".github/compat/patch_mpvplayer.py"
 
 permissions:
   contents: write
@@ -38,12 +39,22 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
+      - name: Check out this repository (patch scripts)
+        uses: actions/checkout@v4
+        with:
+          path: ci
+
       - name: Check out FongMi/media
         uses: actions/checkout@v4
         with:
           repository: ${{ env.MEDIA_REPO }}
           ref: ${{ env.MEDIA_REF }}
           path: media
+
+      # Adds the MpvPlayer / MpvSubtitleOptions members FongMi/TV 5.6.3 calls but the
+      # public fork lacks. Additive only: existing APIs are unchanged.
+      - name: Patch the mpvplayer module
+        run: python3 ci/.github/compat/patch_mpvplayer.py
 
       - uses: actions/setup-java@v4
         with:
@@ -69,7 +80,7 @@ jobs:
           set -euo pipefail
           tasks=""
           for m in $MODULES; do tasks="$tasks :$m:assembleRelease"; done
-          ./gradlew --no-daemon --stacktrace $tasks
+          bash ./gradlew --no-daemon --stacktrace $tasks
 
       - name: Collect AARs
         id: collect
