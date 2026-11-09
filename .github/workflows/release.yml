@@ -140,8 +140,19 @@ jobs:
             echo "storePassword=$STORE_PASSWORD"
           } > local.properties
 
+      # The runner has 16 GB; R8 and APK packaging of the two flavors running in parallel
+      # exhaust the project's default heap, so raise it and cap concurrent workers.
       - name: Build release APKs
-        run: bash ./gradlew --no-daemon --stacktrace :app:assembleRelease
+        run: |
+          set -euo pipefail
+          if grep -q '^org.gradle.jvmargs=' gradle.properties; then
+            sed -i -E '/^org.gradle.jvmargs=/ s/-Xmx[0-9]+[mMgG]/-Xmx8g/' gradle.properties
+            grep -q -- '-Xmx' gradle.properties || sed -i -E 's/^org.gradle.jvmargs=/org.gradle.jvmargs=-Xmx8g /' gradle.properties
+          else
+            echo 'org.gradle.jvmargs=-Xmx8g -Dfile.encoding=UTF-8' >> gradle.properties
+          fi
+          grep '^org.gradle.jvmargs=' gradle.properties
+          bash ./gradlew --no-daemon --stacktrace --max-workers=2 :app:assembleRelease
 
       - name: Collect APKs
         id: collect
