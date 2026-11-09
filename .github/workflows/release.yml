@@ -11,7 +11,7 @@ on:
         required: false
         default: ""
       source_ref:
-        description: "Commit, branch or tag of the app source (empty = the selected branch / default branch). e.g. 4afc447 for FongMi/TV 5.6.3"
+        description: "Commit, branch or tag of the app source (empty = the selected branch / default branch). e.g. 4afc4473e22a7ed3d98ee12233e0c2a490061000 (full SHA) for FongMi/TV 5.6.3"
         required: false
         default: ""
       compat:
@@ -59,7 +59,14 @@ jobs:
           SOURCE_REF: ${{ inputs.source_ref }}
         run: |
           set -euo pipefail
-          if [ -n "$SOURCE_REF" ]; then git checkout --force "$SOURCE_REF"; fi
+          if [ -n "$SOURCE_REF" ]; then
+            # Commits dropped from every branch (e.g. after a history rewrite) are not cloned,
+            # but GitHub still serves them when fetched by full SHA.
+            if ! git checkout --force "$SOURCE_REF" 2>/dev/null; then
+              git fetch --depth=1 origin "$SOURCE_REF"
+              git checkout --force FETCH_HEAD
+            fi
+          fi
           git log -1 --format='Building %H %cs %s'
           echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
