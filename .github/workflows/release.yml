@@ -6,10 +6,21 @@ on:
       - "v*"
   workflow_dispatch:
     inputs:
-      source_ref:
-        description: "Commit, branch or tag of the app source to build (empty = the selected branch). e.g. 4573249c for 5.5.6, which matches the build-libs AARs"
+      source_repo:
+        description: "GitHub repository of the app source (empty = this repository). e.g. FongMi/TV"
         required: false
         default: ""
+      source_ref:
+        description: "Commit, branch or tag of the app source (empty = the selected branch / default branch). e.g. 4afc447 for FongMi/TV 5.6.3"
+        required: false
+        default: ""
+      compat:
+        description: "Compatibility shims for the public FongMi/media AARs"
+        type: choice
+        options:
+          - none
+          - tv-5.6.3
+        default: none
       tag:
         description: "Release tag (leave empty to use v<versionName> from app/build.gradle)"
         required: false
@@ -35,16 +46,35 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out app source
+        uses: actions/checkout@v4
         with:
+          repository: ${{ inputs.source_repo || github.repository }}
+          ref: ${{ inputs.source_repo == '' && inputs.source_ref == '' && github.ref || '' }}
           fetch-depth: 0
 
-      - name: Check out app source
-        if: ${{ inputs.source_ref != '' }}
+      - name: Select source revision
+        id: source
+        env:
+          SOURCE_REF: ${{ inputs.source_ref }}
         run: |
           set -euo pipefail
-          git checkout --force "${{ inputs.source_ref }}"
+          if [ -n "$SOURCE_REF" ]; then git checkout --force "$SOURCE_REF"; fi
           git log -1 --format='Building %H %cs %s'
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Check out this repository (patch scripts)
+        uses: actions/checkout@v4
+        with:
+          path: .ci
+
+      - name: Inject compatibility shims
+        if: ${{ inputs.compat == 'tv-5.6.3' }}
+        run: |
+          set -euo pipefail
+          python3 .ci/.github/compat/inject_tv_5.6.3.py
+          n=$(find app/src/main/java/androidx -name '*.java' | wc -l)
+          [ "$n" -eq 11 ] || { echo "::error::expected 11 injected files, found $n"; exit 1; }
 
       - uses: actions/setup-java@v4
         with:
@@ -124,7 +154,17 @@ jobs:
           [ -n "$(ls dist)" ] || { echo "::error::No APK produced"; exit 1; }
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          if [ -z "${{ inputs.source_repo }}" ] || [ "${{ inputs.source_repo }}" = "$GITHUB_REPOSITORY" ]; then
+            echo "target=${{ steps.source.outputs.sha }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "target=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+          fi
+          {
+            echo "Source: ${{ inputs.source_repo || github.repository }}@${{ steps.source.outputs.sha }}"
+            echo "Compatibility shims: ${{ inputs.compat || 'none' }}"
+            echo "Media AARs: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/tag/$LIBS_RELEASE_TAG"
+            if [ "${TEMP_SIGNING:-false}" = "true" ]; then echo "Signed with a throwaway CI key."; fi
+          } > notes.md
 
       - uses: actions/upload-artifact@v4
         with:
@@ -136,7 +176,7 @@ jobs:
         with:
           tag_name: ${{ steps.collect.outputs.tag }}
           name: ${{ steps.collect.outputs.tag }}
-          target_commitish: ${{ steps.collect.outputs.sha }}
+          target_commitish: ${{ steps.collect.outputs.target }}
+          body_path: notes.md
           prerelease: ${{ inputs.prerelease || env.TEMP_SIGNING == 'true' }}
-          generate_release_notes: true
           files: dist/*.apk
